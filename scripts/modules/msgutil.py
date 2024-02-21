@@ -2,12 +2,13 @@ import socket
 import time
 import json
 import pooltool as pt
+import threading
 from pooltool import System, Cue
 from pooltool.game.ruleset.datatypes import ShotConstraints
 from .poolgame import ShotCall, BallPosition
 from enum import IntEnum
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List
 
 _MSG_HEADER_SIZE = 4
 _MSG_HEADER_BYTEORDER = 'little'
@@ -189,4 +190,86 @@ def receive_msg(conn: socket.socket, maxbufsize: int = 1024, timeout: Optional[f
         return decode_msg(msg)
     except ConnectionClosedError:
         return ConnectionClosedMessage()
+
+#performs async socket IO
+class MessageBuffer:
+    def __init__(self, conn: socket.socket, update_freq: int = 200):
+        assert(conn.getblocking() == False)
+        self._conn = conn
+        self._rec_buffer: bytes = b''
+        self._send_buffer: bytes = b''
+        self._bufsize = 4096
+        self._update_freq = update_freq
+        self._access_lock = threading.Lock()
+        self._exit_event = threading.Event()
+        self._disconnected = threading.Event()
+        self._thread = threading.Thread(target=self._run, args = ())
+        self._thread.start()
+
+    def _run(self):
+        while not self._exit_event.is_set():
+            with self._access_lock:
+                try:
+                    data = self._conn.recv(self._bufsize)
+                    self._rec_buffer += data
+                    if len(data) == 0:
+                        self._disconnected.set()
+                        break
+                except BlockingIOError:
+                    pass
+
+                try:
+                    if len(self._send_buffer):
+                        sent = self._conn.send(self._send_buffer[:self._bufsize])
+                        self._send_buffer = self._send_buffer[sent:]
+                except BlockingIOError:
+                    pass
+            time.sleep(1/self._update_freq)
+
+    def _ret_no_available_msg(self) -> Optional[Message]:
+        return ConnectionClosedMessage() if self._disconnected.is_set() else None
+
+    def peek_msg(self) -> Optional[Message]:
+        with self._access_lock:
+            header = self._rec_buffer[:_MSG_HEADER_SIZE]
+            if len(header) < _MSG_HEADER_SIZE:
+                return self._ret_no_available_msg()
+            msg_len = int.from_bytes(header, byteorder=_MSG_HEADER_BYTEORDER)
+            msg = self._rec_buffer[_MSG_HEADER_SIZE:_MSG_HEADER_SIZE + msg_len]
+            if msg_len > len(msg):
+                return self._ret_no_available_msg()
+            return decode_msg(msg)
+
+    def pop_msg(self) -> Optional[Message]:
+        with self._access_lock:
+            header = self._rec_buffer[:_MSG_HEADER_SIZE]
+            if len(header) < _MSG_HEADER_SIZE:
+                return self._ret_no_available_msg()
+            msg_len = int.from_bytes(header, byteorder=_MSG_HEADER_BYTEORDER)
+            msg = self._rec_buffer[_MSG_HEADER_SIZE:_MSG_HEADER_SIZE + msg_len]
+            if msg_len > len(msg):
+                return self._ret_no_available_msg()
+            self._rec_buffer = self._rec_buffer[_MSG_HEADER_SIZE + msg_len:]
+            return decode_msg(msg)
+
+    def await_msg(self, peek: bool = False, timeout: int = 60) -> Message:
+        msg_func = self.peek_msg if peek else self.pop_msg
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            msg = msg_func()
+            if msg is not None:
+                return msg
+            time.sleep(1/self._update_freq)
+        raise TimeoutError
+
+    def push_msg(self, msg: Message):
+        with self._access_lock:
+            data = msg.encode()
+            header = int.to_bytes(len(data), _MSG_HEADER_SIZE, byteorder=_MSG_HEADER_BYTEORDER)
+            encoded_msg = header + data
+            self._send_buffer += encoded_msg
+
+    def stop(self):
+        self._exit_event.set()
+        self._thread.join()
 
