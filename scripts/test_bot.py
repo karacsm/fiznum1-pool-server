@@ -3,6 +3,7 @@ import logging
 import socket
 import sys
 import time
+import uuid
 import numpy as np
 import pooltool as pt
 from pooltool import System
@@ -47,7 +48,7 @@ def handle_msg(buffer: msgutil.MessageBuffer, msg: msgutil.Message):
     else:
         logging.error('Unexpected message!')
 
-def main_loop(buffer: msgutil.MessageBuffer, update_freq: int = 10):
+def main_loop(buffer: msgutil.MessageBuffer, update_freq: int = 200):
     while True:
         try:
             msg = buffer.pop_msg()
@@ -68,7 +69,11 @@ def main(args):
         conn.connect((args.address, args.port))
         conn.setblocking(False)
         buffer = msgutil.MessageBuffer(conn)
-        buffer.push_msg(msgutil.LoginMessage(args.secret))
+        if args.secret is not None:
+            secret = uuid.UUID(hex = args.secret)
+        else:
+            secret = None
+        buffer.push_msg(msgutil.LoginMessage(args.name, secret))
         msg = buffer.await_msg()
         if isinstance(msg, msgutil.LoginSuccessMessage):
             logging.info(f'Connected as {msg.player_id}. Secret: {msg.secret}. Use this secret to reconnect!')
@@ -104,8 +109,15 @@ if __name__ == '__main__':
                         required = True,
                         help     = 'Set remote server port. Required.')
 
+    parser.add_argument('-n', '--name',
+                        metavar  = 'NAME',
+                        type     = str,
+                        dest     = 'name',
+                        required = True,
+                        help     = 'Set user name. Required.')
+
     parser.add_argument('-s', '--secret',
-                        default = '',
+                        default = None,
                         metavar = 'UUID',
                         type    = str,
                         dest    = 'secret',

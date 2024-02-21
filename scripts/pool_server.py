@@ -4,14 +4,13 @@ import sys
 import socket
 import time
 import uuid
-import pooltool as pt
-import json
-import threading
-from typing import Dict, Optional
 from dataclasses import dataclass
+from typing import Optional, Dict, List
 from enum import Enum
+import pooltool as pt
 
 from modules import msgutil
+from modules.msgutil import MessageBuffer
 from modules import poolgame
 
 @dataclass
@@ -26,233 +25,231 @@ class Address:
     def __str__(self):
         return f'{self.ipv4}/{self.port}'
 
-class Server:
-    def __init__(self, addr: Address, backlog = 3):
+class ConnectionType(Enum):
+    UNKNOWN = 0
+    PLAYER = 1
+
+class _Connection:
+    def __init__(self, sock: socket.socket, raddr: Address, update_freq: int = 200):
+        self.name = ''
+        self.type = ConnectionType.UNKNOWN
+        self.sock = sock
+        self.raddr = raddr
+        self.buffer = MessageBuffer(sock, update_freq)
+
+    def close(self):
+        self.buffer.stop()
+        self.sock.close()
+
+class ConnectionHandler:
+    def __init__(self, addr: Address, backlog = 3, max_players = 2):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setblocking(False)
         self._sock.bind(addr.astuple)
-        self._sock.listen(backlog) 
+        self._sock.listen(backlog)
         self._addr = Address(*self._sock.getsockname())
-        self._connections: Dict[uuid.UUID, socket.socket] = {}
+        self._max_players = max_players
+        self._registered_player_identities: Dict[str, uuid.UUID] = {}
 
     @property
     def address(self):
         return self._addr
 
-    def check_connection(self, conn_uuid: uuid.UUID):
-        return conn_uuid in self._connections.keys()
+    def _auth_player(self, conn: _Connection, msg: msgutil.LoginMessage) -> Optional[_Connection]:
+        if msg.player_id in self._registered_player_identities.keys():
+            if self._registered_player_identities[msg.player_id] == msg.secret:
+                conn.buffer.push_msg(msgutil.LoginSuccessMessage(msg.player_id, msg.secret))
+                conn.name = msg.player_id
+                conn.type = ConnectionType.PLAYER
+                return conn
+        
+        conn.buffer.push_msg(msgutil.LoginFailedMessage('Invalid login!'))
+        conn.close()
+        return None
 
-    def accept_connection(self) -> Optional[uuid.UUID]:
-        try:
-            conn, cli_addr = self._sock.accept()
-            logging.debug(f'Client connected from address {str(Address(*cli_addr))}.')
-            conn_uuid = uuid.uuid4()
-            self._connections[conn_uuid] = conn
-            return conn_uuid
-        except BlockingIOError:
+    def _register_player(self, conn: _Connection, msg: msgutil.LoginMessage) -> Optional[_Connection]:
+        if len(self._registered_player_identities) < self._max_players:
+            if not (msg.player_id in self._registered_player_identities.keys()):
+                secret = uuid.uuid4()
+                self._registered_player_identities[msg.player_id] = secret
+                conn.buffer.push_msg(msgutil.LoginSuccessMessage(msg.player_id, secret))
+                conn.name = msg.player_id
+                conn.type = ConnectionType.PLAYER
+                return conn
+            else:
+                conn.buffer.push_msg(msgutil.LoginFailedMessage('Name already in use!'))
+                conn.close()
+                return None
+        else:
+            conn.buffer.push_msg(msgutil.LoginFailedMessage('Server full!'))
+            conn.close()
             return None
 
-    def close_connection(self, conn_uuid: uuid.UUID):
-        self._connections[conn_uuid].close()
-        del self._connections[conn_uuid]
-    
-    def send_msg_to(self, conn_uuid: uuid.UUID, msg: msgutil.Message, timeout: Optional[float] = None):
-        msgutil.send_msg(self._connections[conn_uuid], msg, timeout=timeout)
+    def _handle_login(self, conn: _Connection, msg: msgutil.LoginMessage) -> Optional[_Connection]:
+        if msg.secret is not None:
+            return self._auth_player(conn, msg)
+        else:
+            return self._register_player(conn, msg)
 
-    def receive_msg_from(self, conn_uuid: uuid.UUID, timeout: Optional[float] = None) -> msgutil.Message:
-        return msgutil.receive_msg(self._connections[conn_uuid], timeout=timeout)
+    def _handle_connection(self, conn: _Connection) -> Optional[_Connection]:
+        try:
+            msg = conn.buffer.await_msg()
+        except TimeoutError:
+            conn.close()
+            return None
+
+        if isinstance(msg, msgutil.ConnectionClosedMessage):
+            conn.close()
+            return None
+        elif isinstance(msg, msgutil.LoginMessage):
+            return self._handle_login(conn, msg)
+        else:
+            logging.info('Unexpected message from connection!')
+            conn.close()
+            return None
+
+    def poll_connection(self) -> Optional[_Connection]:
+        try:
+            conn_sock, raddr = self._sock.accept()
+        except BlockingIOError:
+            return None
+        conn_sock.setblocking(False)
+        conn = _Connection(conn_sock, Address(*raddr))
+        return self._handle_connection(conn)
 
     def shutdown(self):
-        for conn_uuid in self._connections:
-            self._connections[conn_uuid].close()
         self._sock.close()
+        
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_val, exc_type, traceback):
+        self.shutdown()
+
+class MatchState(Enum):
+    WaitingForPlayers = 0
+    ReadyForNextMove = 1
+    WaitingForNextMove = 2
+    MatchOver = 3
+
+class MatchServer:
+    def __init__(self, addr: Address, race_to: int = 10):
+        self._game_count = 0
+        self._addr = addr
+        self._race_to = race_to
+        self._match = None
+        self._state = MatchState.WaitingForPlayers
+        self._player_connections: Dict[str, _Connection] = {}
+
+    def _remove_player_connection(self, name: str):
+        self._player_connections[name].close()
+        del self._player_connections[name]
+
+    def _add_player_connection(self, conn: _Connection):
+        if conn.name in self._player_connections.keys():
+            self._remove_player_connection(conn.name)
+        logging.info(f'Player {conn.name} connected!')
+        self._player_connections[conn.name] = conn
+        assert(len(self._player_connections) <= 2)
+
+    def _stage_waiting_for_players(self, handler: ConnectionHandler):
+        conn = handler.poll_connection()
+        if conn is not None:
+            if conn.type == ConnectionType.PLAYER:
+                self._add_player_connection(conn)
+            else:
+                logging.info('Unexpected connection! Dropping connection!')
+                conn.close()
+        if len(self._player_connections) == 2:
+            if self._match is None:
+                self._match = poolgame.PoolMatch(pt.GameType.NINEBALL,
+                                                    list(self._player_connections.keys()),
+                                                    self._race_to)
+                logging.info('Starting match.')
+                logging.info(f'The first player to win {self._race_to} games wins the match.')
+            self._state = MatchState.ReadyForNextMove
+
+    def _stage_ready_for_next_move(self):
+        player = self._match.active_player_name()
+        self._player_connections[player].buffer.push_msg(msgutil.YourTurnMessage(self._match.get_system(),
+                                                                                    self._match.get_shot_constraints(),
+                                                                                    self._match.is_break()))
+        self._state = MatchState.WaitingForNextMove
+
+    def _stage_waiting_for_next_move(self):
+        player = self._match.active_player_name()
+        msg = self._player_connections[player].buffer.pop_msg()
+        if msg is not None:
+            if isinstance(msg, msgutil.ConnectionClosedMessage):
+                logging.info(f'{player} disconnected!')
+                self._remove_player_connection(player)
+                self._state = MatchState.WaitingForPlayers
+                logging.info('Waiting for players . . .')
+            elif isinstance(msg, msgutil.MakeShotMessage):
+                self._match.make_shot(msg.cue, msg.cue_ball_pos, msg.shot_call)
+                if self._match.is_match_over():
+                    self._state = MatchState.MatchOver
+                else:
+                    if self._match.is_break():
+                        self._game_count += 1
+                        logging.info(f'Game {self._game_count} finished. Current standing: {self._match._scores}.')
+                    self._state = MatchState.ReadyForNextMove
+            else:
+                logging.info('Unexpected message!')
+
+    def _stage_match_over(self):
+        logging.info('Match over!')
+        logging.info(f'{self._match.match_winner()} won!. Final score: {self._match._scores}.')
+        for name in self._player_connections.keys():
+            winner = self._match.match_winner()
+            self._player_connections[name].buffer.push_msg(msgutil.GameOverMessage(winner, self._match._scores))
+            self._player_connections[name].close()
+        raise KeyboardInterrupt
+
+    def _update(self, handler: ConnectionHandler):
+        #Waiting for players
+        if self._state == MatchState.WaitingForPlayers:
+            self._stage_waiting_for_players(handler)
+        #Ready for next move
+        elif self._state == MatchState.ReadyForNextMove:
+            self._stage_ready_for_next_move()
+        #Waiting for next move
+        elif self._state == MatchState.WaitingForNextMove:
+            self._stage_waiting_for_next_move()
+        #Match over
+        elif self._state == MatchState.MatchOver:
+            self._stage_match_over()
+        
+    def main_loop(self, update_freq: int = 20):
+        try:
+            with ConnectionHandler(self._addr) as handler:
+                self._addr = handler.address
+                logging.info(f'Listening on address {handler.address}.')
+                logging.info('Waiting for players . . .')
+                while True:
+                    self._update(handler)
+                    time.sleep(1/update_freq)
+        except KeyboardInterrupt:
+            logging.info('Shutting down . . .')
+
+    def shutdown(self):
+        for conn in self._player_connections.values():
+            conn.close()
 
     def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc_val, traceback):
+    def __exit__(self, exc_val, exc_type, traceback):
         self.shutdown()
 
-@dataclass
-class PlayerClient:
-    name: str
-    conn_uuid: uuid.UUID
-    connected: bool = True
-
-class GameState:
-    WaitingForPlayers = 1
-    ReadyForNextMove = 2
-    WaitingForNextMove = 3
-    MatchOver = 4
-
-class MatchServer:
-    def __init__(self, addr: Address, max_score: int = 10):
-        self._addr = addr
-        self._player_names = ['P1', 'P2']
-        self._match = poolgame.PoolMatch(pt.GameType.NINEBALL, self._player_names, max_score)
-        self._available_names = self._player_names.copy()
-        self._player_identities: Dict[str, str] = {}       #name to secret
-        self._player_clients: Dict[str, PlayerClient] = {} #secret to client
-        self._game_state = GameState.WaitingForPlayers
-        self._player_transmission_lock = threading.Lock()
-        self._update_lock = threading.Lock()
-
-    def _full(self) -> bool:
-        return len(self._available_names) == 0
-
-    def _connected(self, name: str) -> bool:
-        if name in self._player_identities.keys():
-            secret = self._player_identities[name]
-            client = self._player_clients[secret]
-            return client.connected
-        else:
-            return False
-
-    def _disconnect_player(self, server: Server, name: str):
-        if name in self._player_identities.keys():
-            secret = self._player_identities[name]
-            client = self._player_clients[secret]
-            client.connected = False
-            if server.check_connection(client.conn_uuid):
-                server.close_connection(client.conn_uuid)
-
-    def _get_player_conn_uuid(self, name: str):
-        secret = self._player_identities[name]
-        return self._player_clients[secret].conn_uuid
-
-    def _auth_connection(self, server: Server, conn_uuid: uuid.UUID, secret: str):
-        if secret in self._player_identities.values():
-            if server.check_connection(self._player_clients[secret].conn_uuid):
-                server.close_connection(self._player_clients[secret].conn_uuid)
-            self._player_clients[secret].conn_uuid = conn_uuid
-            self._player_clients[secret].connected = True
-            server.send_msg_to(conn_uuid, msgutil.LoginSuccessMessage(self._player_clients[secret].name, secret))
-            logging.info(f'{self._player_clients[secret].name} reconnected.')
-            if (self._game_state == GameState.WaitingForNextMove) and (self._player_clients[secret].name == self._match.active_player_name()):
-                self._game_state = GameState.ReadyForNextMove
-        else:
-            server.send_msg_to(conn_uuid, msgutil.LoginFailedMessage('Invalid login!'))
-            server.close_connection(conn_uuid)
-
-    def _register_player(self, server: Server, conn_uuid: uuid.UUID):
-        if not self._full():
-            name = self._available_names.pop(0)
-            secret = conn_uuid.hex
-            self._player_identities[name] = secret
-            self._player_clients[secret] = PlayerClient(name, conn_uuid)
-            server.send_msg_to(conn_uuid, msgutil.LoginSuccessMessage(name, secret))
-            logging.info(f'{name} logged in.')
-        else:
-            server.send_msg_to(conn_uuid, msgutil.LoginFailedMessage('Server full!'))
-            server.close_connection(conn_uuid)
-
-    def _handle_login_request(self, server: Server, conn_uuid: uuid.UUID, msg: msgutil.LoginMessage):
-        with self._update_lock:
-            if len(msg.secret) > 0:
-                self._auth_connection(server, conn_uuid, msg.secret)
-            else:
-                self._register_player(server, conn_uuid)
-
-    def _handle_connection(self, server: Server, conn_uuid: uuid.UUID):
-        try:
-            msg = server.receive_msg_from(conn_uuid, timeout = 60)
-            if isinstance(msg, msgutil.LoginMessage):
-                self._handle_login_request(server, conn_uuid, msg)
-            else:
-                server.close_connection(conn_uuid)
-        except socket.timeout:
-            logging.warning('Connection timed out! Dropping connection!')
-            server.close_connection(conn_uuid)
-        except msgutil.InvalidMessageError:
-            logging.error('Failed to decode message!')
-            server.close_connection(conn_uuid)
-        if len(server._connections) > 2:
-            logging.error('Connection leaked!')
-
-    def _send_move_request(self, server: Server):
-        conn_uuid = self._get_player_conn_uuid(self._match.active_player_name())
-        msg = msgutil.YourTurnMessage(self._match.get_system(),
-                                      self._match.get_shot_constraints(),
-                                      self._match.is_break())
-        server.send_msg_to(conn_uuid, msg)
-
-    def _attempt_player_move(self, server):
-        try:
-            player_name = self._match.active_player_name()
-            conn_uuid = self._get_player_conn_uuid(player_name)
-            msg = server.receive_msg_from(conn_uuid, timeout = 0.1)
-            if isinstance(msg, msgutil.ConnectionClosedMessage):
-                self._disconnect_player(server, player_name)
-                logging.info(f'{player_name} disconnected!')
-                self._game_state = GameState.WaitingForPlayers
-            elif isinstance(msg, msgutil.MakeShotMessage):
-                #TODO validate shot request
-                if self._match.is_break():
-                    logging.info(f'Startin new game! Current standing: {self._match._scores}')
-                    logging.info(f'{self._match.active_player_name()} breaks.')
-                self._match.make_shot(msg.cue, msg.cue_ball_pos, msg.shot_call)
-                if self._match.is_match_over():
-                    self._game_state = GameState.MatchOver
-                else:
-                    self._game_state = GameState.ReadyForNextMove
-            else:
-                logging.warining('Unexpected message!')
-        except msgutil.InvalidMessageError:
-            logging.error('Failed to decode message!')
-        except socket.timeout:
-            return
-
-    def _update(self, server: Server):
-        with self._update_lock:
-            #Waiting for players
-            if self._game_state == GameState.WaitingForPlayers:
-                connected = True
-                for name in self._player_names:
-                    connected = connected and self._connected(name)
-                if self._full() and connected:
-                    self._game_state = GameState.ReadyForNextMove
-            #Ready for next move
-            elif self._game_state == GameState.ReadyForNextMove:
-                self._send_move_request(server)
-                self._game_state = GameState.WaitingForNextMove
-            #Waiting for next move
-            elif self._game_state == GameState.WaitingForNextMove:
-                self._attempt_player_move(server)
-            #Game over
-            elif self._game_state == GameState.MatchOver:
-                logging.info(f'Match is over! {self._match.match_winner()} won! Scores: {str(self._match._scores)}')
-                for name in self._player_names:
-                    conn_uuid = self._get_player_conn_uuid(name)
-                    if self._connected(name):
-                        server.send_msg_to(conn_uuid, msgutil.GameOverMessage(self._match.match_winner(), self._match._scores))
-                        self._disconnect_player(server, name)
-                raise KeyboardInterrupt #exit
-                
-    def _serve_forever(self, server: Server, update_freq: int = 10):
-        while True:
-            conn_uuid = server.accept_connection()
-            if conn_uuid is not None:
-                connection_handler = threading.Thread(target=self._handle_connection, args=(server, conn_uuid))
-                connection_handler.start()
-            self._update(server)
-            time.sleep(1/update_freq)
-            
-    def main_loop(self):
-        try:
-            with Server(self._addr) as server:
-                logging.info(f'Listening on port {server.address.port} . . .')
-                self._serve_forever(server)
-        except KeyboardInterrupt:
-            logging.info('Interrupted signal received! Shutting down . . .')
-        
 def main(args):
     logging.basicConfig(stream=sys.stdout,
                         format='[%(asctime)s] %(levelname)s: %(message)s',
                         datefmt='%Y-%m-%d %H:%M:%S', level = args.log_level)
 
     addr = Address(args.address, args.port)
-    m = MatchServer(addr, args.race_to)
-    m.main_loop()
+    with MatchServer(addr, args.race_to) as server:
+        server.main_loop()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
