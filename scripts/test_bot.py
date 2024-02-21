@@ -32,13 +32,14 @@ def calculate_shot(system: System, shot_constraints: ShotConstraints, break_shot
     shot_call: Optional[ShotCall] = None #TODO call shots for eightball
     return cue, cue_ball_pos, shot_call
 
-def handle_msg(conn: socket.socket, msg: msgutil.Message):
+def handle_msg(buffer: msgutil.MessageBuffer, msg: msgutil.Message):
     if isinstance(msg, msgutil.ConnectionClosedMessage):
+        logging.info('Server disconnected!')
         raise KeyboardInterrupt #exit
     elif isinstance(msg, msgutil.YourTurnMessage):
         cue, cue_ball_pos, shot_call = calculate_shot(msg.system, msg.shot_constraints, msg.break_shot)
-        logging.debug(cue)
-        msgutil.send_msg(conn, msgutil.MakeShotMessage(cue, cue_ball_pos=cue_ball_pos, shot_call=shot_call))
+        logging.info(cue)
+        buffer.push_msg(msgutil.MakeShotMessage(cue, cue_ball_pos=cue_ball_pos, shot_call=shot_call))
     elif isinstance(msg, msgutil.GameOverMessage):
         logging.info('Match over!')
         logging.info(f'Winner: {msg.winner}. Scores: {str(msg.scores)}.')
@@ -46,14 +47,15 @@ def handle_msg(conn: socket.socket, msg: msgutil.Message):
     else:
         logging.error('Unexpected message!')
 
-def main_loop(conn: socket.socket, update_freq: int = 10):
+def main_loop(buffer: msgutil.MessageBuffer, update_freq: int = 10):
     while True:
         try:
-            msg = msgutil.receive_msg(conn, timeout=0.1)
-            handle_msg(conn, msg)
+            msg = buffer.pop_msg()
+            if msg is not None:
+                handle_msg(buffer, msg)
         except msgutil.InvalidMessageError:
             logging.error('Invaild message!')
-        except socket.timeout:
+        except BlockingIOError:
             pass
         time.sleep(1/update_freq)
 
@@ -64,16 +66,19 @@ def main(args):
     try:
         conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         conn.connect((args.address, args.port))
-        msgutil.send_msg(conn, msgutil.LoginMessage(args.secret))
-        msg = msgutil.receive_msg(conn)
+        conn.setblocking(False)
+        buffer = msgutil.MessageBuffer(conn)
+        buffer.push_msg(msgutil.LoginMessage(args.secret))
+        msg = buffer.await_msg()
         if isinstance(msg, msgutil.LoginSuccessMessage):
             logging.info(f'Connected as {msg.player_id}. Secret: {msg.secret}. Use this secret to reconnect!')
-            main_loop(conn)
+            main_loop(buffer)
         elif isinstance(msg, msgutil.LoginFailedMessage):
             logging.info(f'Failed to login! {msg.reason}')
     except KeyboardInterrupt:
         logging.info('Interrupted! Shutting down . . .')
     finally:
+        buffer.stop()
         conn.close()
 
 if __name__ == '__main__':
