@@ -4,6 +4,7 @@ import json
 import uuid
 import pooltool as pt
 import threading
+import select
 from pooltool import System, Cue
 from pooltool.game.ruleset.datatypes import ShotConstraints
 from .poolgame import ShotCall, BallPosition
@@ -54,16 +55,16 @@ class ConnectionClosedMessage(Message):
         pass
 
 class LoginMessage(Message):
-    def __init__(self, name: str, secret: Optional[uuid.UUID] = None):
-        self.name = name
+    def __init__(self, player_id: str, secret: Optional[uuid.UUID] = None):
+        self.player_id = player_id
         self.secret = secret
-        data = {'name' : name}
+        data = {'player_id' : player_id}
         if secret is not None:
             data['secret'] = secret.hex
         super().__init__(MessageCode.Login, data)
 
     def _decode_data(self):
-        self.name = self.data['name']
+        self.player_id = self.data['player_id']
         if 'secret' in self.data.keys():
             self.secret = uuid.UUID(hex = self.data['secret'])
         else:
@@ -183,23 +184,20 @@ class MessageBuffer:
         self._thread.start()
 
     def _run(self):
-        while not self._exit_event.is_set():
+        while True:
+            rlst, wlst, _ = select.select([self._conn], [self._conn], [])
             with self._access_lock:
-                try:
-                    data = self._conn.recv(self._bufsize)
+                if rlst:
+                    data = rlst[0].recv(self._bufsize)
                     self._rec_buffer += data
                     if len(data) == 0:
                         self._disconnected.set()
                         break
-                except BlockingIOError:
-                    pass
-
-                try:
-                    if len(self._send_buffer):
-                        sent = self._conn.send(self._send_buffer[:self._bufsize])
-                        self._send_buffer = self._send_buffer[sent:]
-                except BlockingIOError:
-                    pass
+                if wlst and len(self._send_buffer) > 0:
+                    sent = wlst[0].send(self._send_buffer[:self._bufsize])
+                    self._send_buffer = self._send_buffer[sent:]
+                elif self._exit_event.is_set():
+                    break
             time.sleep(1/self._update_freq)
 
     def _ret_no_available_msg(self) -> Optional[Message]:
