@@ -25,14 +25,10 @@ class Address:
     def __str__(self):
         return f'{self.ipv4}/{self.port}'
 
-class ConnectionType(Enum):
-    UNKNOWN = 0
-    PLAYER = 1
-
 class _Connection:
     def __init__(self, sock: socket.socket, raddr: Address, update_freq: int = 200):
         self.name = ''
-        self.type = ConnectionType.UNKNOWN
+        self.type = msgutil.ConnectionType.UNKNOWN
         self.sock = sock
         self.raddr = raddr
         self.buffer = MessageBuffer(sock, update_freq)
@@ -60,7 +56,7 @@ class ConnectionHandler:
             if self._registered_player_identities[msg.player_id] == msg.secret:
                 conn.buffer.push_msg(msgutil.LoginSuccessMessage(msg.player_id, msg.secret))
                 conn.name = msg.player_id
-                conn.type = ConnectionType.PLAYER
+                conn.type = msgutil.ConnectionType.PLAYER
                 return conn
         
         conn.buffer.push_msg(msgutil.LoginFailedMessage('Invalid login!'))
@@ -74,7 +70,7 @@ class ConnectionHandler:
                 self._registered_player_identities[msg.player_id] = secret
                 conn.buffer.push_msg(msgutil.LoginSuccessMessage(msg.player_id, secret))
                 conn.name = msg.player_id
-                conn.type = ConnectionType.PLAYER
+                conn.type = msgutil.ConnectionType.PLAYER
                 return conn
             else:
                 conn.buffer.push_msg(msgutil.LoginFailedMessage('Name already in use!'))
@@ -133,13 +129,14 @@ class MatchState(Enum):
     MatchOver = 3
 
 class MatchServer:
-    def __init__(self, addr: Address, race_to: int = 10):
+    def __init__(self, addr: Address, race_to: int = 10, view_mode: bool = False):
         self._game_count = 0
         self._addr = addr
         self._race_to = race_to
         self._match = None
         self._state = MatchState.WaitingForPlayers
         self._player_connections: Dict[str, _Connection] = {}
+        self._view_mode = view_mode
 
     def _remove_player_connection(self, name: str):
         self._player_connections[name].close()
@@ -155,7 +152,7 @@ class MatchServer:
     def _stage_waiting_for_players(self, handler: ConnectionHandler):
         conn = handler.poll_connection()
         if conn is not None:
-            if conn.type == ConnectionType.PLAYER:
+            if conn.type == msgutil.ConnectionType.PLAYER:
                 self._add_player_connection(conn)
             else:
                 logging.info('Unexpected connection! Dropping connection!')
@@ -186,7 +183,8 @@ class MatchServer:
                 self._state = MatchState.WaitingForPlayers
                 logging.info('Waiting for players . . .')
             elif isinstance(msg, msgutil.MakeShotMessage):
-                self._match.make_shot(msg.cue, msg.cue_ball_pos, msg.shot_call)
+                info = self._match.make_shot(msg.cue, msg.cue_ball_pos, msg.shot_call)
+                logging.debug(info)
                 if self._match.is_match_over():
                     self._state = MatchState.MatchOver
                 else:
@@ -248,7 +246,7 @@ def main(args):
                         datefmt='%Y-%m-%d %H:%M:%S', level = args.log_level)
 
     addr = Address(args.address, args.port)
-    with MatchServer(addr, args.race_to) as server:
+    with MatchServer(addr, args.race_to, args.view_mode) as server:
         server.main_loop()
 
 if __name__ == '__main__':
@@ -280,6 +278,12 @@ if __name__ == '__main__':
                         type    = int,
                         dest    = 'race_to',
                         help    = 'The first player to reach this score wins the match. Default is 10.')
+
+    parser.add_argument('-v',
+                        default = False,
+                        action  = 'store_true',
+                        dest    = 'view_mode',
+                        help    = 'Set view mode.')
 
     args = parser.parse_args()
     main(args)
