@@ -54,17 +54,24 @@ class ConnectionClosedMessage(Message):
     def _decode_data(self):
         pass
 
+class ConnectionType(IntEnum):
+    UNKNOWN = 0
+    PLAYER = 1
+    VIEWER = 2
+
 class LoginMessage(Message):
-    def __init__(self, player_id: str, secret: Optional[uuid.UUID] = None):
+    def __init__(self, player_id: str, secret: Optional[uuid.UUID] = None, conn_type = ConnectionType.PLAYER):
         self.player_id = player_id
         self.secret = secret
-        data = {'player_id' : player_id}
+        self.conn_type = conn_type
+        data = {'player_id' : player_id, 'conn_type' : conn_type}
         if secret is not None:
             data['secret'] = secret.hex
         super().__init__(MessageCode.Login, data)
 
     def _decode_data(self):
         self.player_id = self.data['player_id']
+        self.conn_type = ConnectionType(self.data['conn_type'])
         if 'secret' in self.data.keys():
             self.secret = uuid.UUID(hex = self.data['secret'])
         else:
