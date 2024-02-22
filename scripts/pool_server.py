@@ -161,13 +161,12 @@ class MatchServer:
 
     def _add_viewer_connection(self, conn: _Connection):
         if conn.name in self._viewer_connections.keys():
-            self._remove_player_connection(conn.name)
+            self._remove_viewer_connection(conn.name)
         logging.info(f'Viewer {conn.name} connected!')
         self._viewer_connections[conn.name] = conn
         assert(len(self._viewer_connections) <= 2)
 
-    def _stage_waiting_for_players(self, handler: ConnectionHandler):
-        conn = handler.poll_connection()
+    def _accept_connection(self, conn):
         if conn is not None:
             if conn.type == msgutil.ConnectionType.PLAYER:
                 self._add_player_connection(conn)
@@ -176,12 +175,20 @@ class MatchServer:
             else:
                 logging.info('Unexpected connection! Dropping connection!')
                 conn.close()
-        if len(self._player_connections) == 2:
+
+    def _stage_waiting_for_players(self, handler: ConnectionHandler):
+        conn = handler.poll_connection()
+        self._accept_connection(conn)
+        proceed = len(self._player_connections) == 2
+        if self._view_mode:
+            proceed = proceed and (len(self._viewer_connections) > 0)
+        if proceed:
             if self._match is None:
                 self._match = poolgame.PoolMatch(pt.GameType.NINEBALL,
                                                     list(self._player_connections.keys()),
                                                     self._race_to)
-                logging.info('Starting match.')
+                names = list(self._player_connections.keys())
+                logging.info(f'Starting match. {names[0]} vs. {names[1]}')
                 logging.info(f'The first player to win {self._race_to} games wins the match.')
             self._state = MatchState.ReadyForNextMove
 
@@ -192,18 +199,35 @@ class MatchServer:
                                                                                     self._match.is_break()))
         self._state = MatchState.WaitingForNextMove
 
+    def _send_broad_cast_message(self, shot_info):
+        for name in self._viewer_connections.keys():
+            conn = self._viewer_connections[name]
+            msg = conn.buffer.pop_msg()
+            if msg is not None:
+                if isinstance(msg, msgutil.ConnectionClosedMessage):
+                    self._remove_viewer_connection(name)
+                    self._state = MatchState.WaitingForPlayers
+                    logging.info(f'Viewer {name} disconnected.')
+            else:
+                conn.buffer.push_msg(msgutil.BroadcastMessage(self._match.get_system(),
+                                                              shot_info,
+                                                              self._match.is_break(),
+                                                              self._match._scores))
+                if self._view_mode:
+                    time.sleep(self._match.get_system().t + 2)
+
     def _stage_waiting_for_next_move(self):
         player = self._match.active_player_name()
         msg = self._player_connections[player].buffer.pop_msg()
         if msg is not None:
             if isinstance(msg, msgutil.ConnectionClosedMessage):
-                logging.info(f'{player} disconnected!')
+                logging.info(f'Player {player} disconnected!')
                 self._remove_player_connection(player)
                 self._state = MatchState.WaitingForPlayers
                 logging.info('Waiting for players . . .')
             elif isinstance(msg, msgutil.MakeShotMessage):
-                info = self._match.make_shot(msg.cue, msg.cue_ball_pos, msg.shot_call)
-                logging.debug(info)
+                shot_info = self._match.make_shot(msg.cue, msg.cue_ball_pos, msg.shot_call)
+                logging.debug(shot_info)
                 if self._match.is_match_over():
                     self._state = MatchState.MatchOver
                 else:
@@ -211,6 +235,7 @@ class MatchServer:
                         self._game_count += 1
                         logging.info(f'Game {self._game_count} finished. Current standing: {self._match._scores}.')
                     self._state = MatchState.ReadyForNextMove
+                self._send_broad_cast_message(shot_info)
             else:
                 logging.info('Unexpected message!')
 
