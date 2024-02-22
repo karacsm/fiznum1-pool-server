@@ -38,39 +38,44 @@ class _Connection:
         self.sock.close()
 
 class ConnectionHandler:
-    def __init__(self, addr: Address, backlog = 3, max_players = 2):
+    def __init__(self, addr: Address, view_mode = False, backlog = 3, max_players = 2, max_viewers = 1):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setblocking(False)
         self._sock.bind(addr.astuple)
         self._sock.listen(backlog)
         self._addr = Address(*self._sock.getsockname())
-        self._max_players = max_players
-        self._registered_player_identities: Dict[str, uuid.UUID] = {}
+        self._registered_client_identities: Dict[str, uuid.UUID] = {}
+        self._registered_client_types: Dict[str, msgutil.ConnectionType] = {}
+        self._client_counts = {msgutil.ConnectionType.PLAYER : 0, msgutil.ConnectionType.VIEWER : 0}
+        self._client_limits = {msgutil.ConnectionType.PLAYER : max_players, msgutil.ConnectionType.VIEWER : max_viewers if view_mode else 0}
+        self._view_mode = view_mode
 
     @property
     def address(self):
         return self._addr
 
-    def _auth_player(self, conn: _Connection, msg: msgutil.LoginMessage) -> Optional[_Connection]:
-        if msg.player_id in self._registered_player_identities.keys():
-            if self._registered_player_identities[msg.player_id] == msg.secret:
+    def _auth_client(self, conn: _Connection, msg: msgutil.LoginMessage) -> Optional[_Connection]:
+        if msg.player_id in self._registered_client_identities.keys():
+            if (self._registered_client_identities[msg.player_id] == msg.secret) and (self._registered_client_types[msg.player_id] == msg.conn_type):
                 conn.buffer.push_msg(msgutil.LoginSuccessMessage(msg.player_id, msg.secret))
                 conn.name = msg.player_id
-                conn.type = msgutil.ConnectionType.PLAYER
+                conn.type = msg.conn_type
                 return conn
         
         conn.buffer.push_msg(msgutil.LoginFailedMessage('Invalid login!'))
         conn.close()
         return None
 
-    def _register_player(self, conn: _Connection, msg: msgutil.LoginMessage) -> Optional[_Connection]:
-        if len(self._registered_player_identities) < self._max_players:
-            if not (msg.player_id in self._registered_player_identities.keys()):
+    def _register_client(self, conn: _Connection, msg: msgutil.LoginMessage) -> Optional[_Connection]:
+        if self._client_counts[msg.conn_type] < self._client_limits[msg.conn_type]:
+            if not (msg.player_id in self._registered_client_identities.keys()):
                 secret = uuid.uuid4()
-                self._registered_player_identities[msg.player_id] = secret
+                self._registered_client_identities[msg.player_id] = secret
+                self._registered_client_types[msg.player_id] = msg.conn_type
+                self._client_counts[msg.conn_type] += 1
                 conn.buffer.push_msg(msgutil.LoginSuccessMessage(msg.player_id, secret))
                 conn.name = msg.player_id
-                conn.type = msgutil.ConnectionType.PLAYER
+                conn.type = msg.conn_type
                 return conn
             else:
                 conn.buffer.push_msg(msgutil.LoginFailedMessage('Name already in use!'))
@@ -83,9 +88,9 @@ class ConnectionHandler:
 
     def _handle_login(self, conn: _Connection, msg: msgutil.LoginMessage) -> Optional[_Connection]:
         if msg.secret is not None:
-            return self._auth_player(conn, msg)
+            return self._auth_client(conn, msg)
         else:
-            return self._register_player(conn, msg)
+            return self._register_client(conn, msg)
 
     def _handle_connection(self, conn: _Connection) -> Optional[_Connection]:
         try:
@@ -136,11 +141,16 @@ class MatchServer:
         self._match = None
         self._state = MatchState.WaitingForPlayers
         self._player_connections: Dict[str, _Connection] = {}
+        self._viewer_connections: Dict[str, _Connection] = {}
         self._view_mode = view_mode
 
     def _remove_player_connection(self, name: str):
         self._player_connections[name].close()
         del self._player_connections[name]
+
+    def _remove_viewer_connection(self, name: str):
+        self._viewer_connections[name].close()
+        del self._viewer_connections[name]
 
     def _add_player_connection(self, conn: _Connection):
         if conn.name in self._player_connections.keys():
@@ -149,11 +159,20 @@ class MatchServer:
         self._player_connections[conn.name] = conn
         assert(len(self._player_connections) <= 2)
 
+    def _add_viewer_connection(self, conn: _Connection):
+        if conn.name in self._viewer_connections.keys():
+            self._remove_player_connection(conn.name)
+        logging.info(f'Viewer {conn.name} connected!')
+        self._viewer_connections[conn.name] = conn
+        assert(len(self._viewer_connections) <= 2)
+
     def _stage_waiting_for_players(self, handler: ConnectionHandler):
         conn = handler.poll_connection()
         if conn is not None:
             if conn.type == msgutil.ConnectionType.PLAYER:
                 self._add_player_connection(conn)
+            elif conn.type == msgutil.ConnectionType.VIEWER:
+                self._add_viewer_connection(conn)
             else:
                 logging.info('Unexpected connection! Dropping connection!')
                 conn.close()
@@ -220,7 +239,7 @@ class MatchServer:
         
     def main_loop(self, update_freq: int = 20):
         try:
-            with ConnectionHandler(self._addr) as handler:
+            with ConnectionHandler(self._addr, self._view_mode) as handler:
                 self._addr = handler.address
                 logging.info(f'Listening on address {handler.address}.')
                 logging.info('Waiting for players . . .')
@@ -232,6 +251,8 @@ class MatchServer:
 
     def shutdown(self):
         for conn in self._player_connections.values():
+            conn.close()
+        for conn in self._viewer_connections.values():
             conn.close()
 
     def __enter__(self):
