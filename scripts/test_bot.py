@@ -73,7 +73,7 @@ def main(args):
             secret = uuid.UUID(hex = args.secret)
         else:
             secret = None
-        buffer.push_msg(msgutil.LoginMessage(args.name, secret))
+        buffer.push_msg(msgutil.LoginMessage(args.name, secret, conn_type=msgutil.ConnectionType.PLAYER))
         msg = buffer.await_msg()
         if isinstance(msg, msgutil.LoginSuccessMessage):
             logging.info(f'Connected as {msg.player_id}. Secret: {msg.secret}. Use this secret to reconnect!')
