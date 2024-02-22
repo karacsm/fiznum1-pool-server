@@ -170,7 +170,7 @@ class MessageBuffer:
     Send message with push_msg()
     Call stop() before closing the socket.
     """
-    def __init__(self, conn: socket.socket, update_freq: int = 200):
+    def __init__(self, conn: socket.socket, update_freq: int = 200, run: bool = True):
         assert(conn.getblocking() == False)
         self._conn = conn
         self._rec_buffer: bytes = b''
@@ -180,8 +180,9 @@ class MessageBuffer:
         self._access_lock = threading.Lock()
         self._exit_event = threading.Event()
         self._disconnected = threading.Event()
-        self._thread = threading.Thread(target=self._run, args = ())
-        self._thread.start()
+        if run:
+            self._thread = threading.Thread(target=self._run, args = ())
+            self._thread.start()
 
     def _run(self):
         while True:
@@ -199,6 +200,24 @@ class MessageBuffer:
                 elif self._exit_event.is_set():
                     break
             time.sleep(1/self._update_freq)
+
+    #manual buffer update
+    def update(self):
+        with self._access_lock:
+            try:
+                data = self._conn.recv(self._bufsize)
+                self._rec_buffer += data
+                if len(data) == 0:
+                    self._disconnected.set()
+            except BlockingIOError:
+                pass
+
+            if len(self._send_buffer) > 0:
+                try:
+                    sent = self._conn.send(self._send_buffer[:self._bufsize])
+                    self._send_buffer = self._send_buffer[sent:]
+                except BlockingIOError:
+                    pass
 
     def _ret_no_available_msg(self) -> Optional[Message]:
         return ConnectionClosedMessage() if self._disconnected.is_set() else None
