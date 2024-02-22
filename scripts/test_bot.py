@@ -39,7 +39,7 @@ def handle_msg(buffer: msgutil.MessageBuffer, msg: msgutil.Message):
         raise KeyboardInterrupt #exit
     elif isinstance(msg, msgutil.YourTurnMessage):
         cue, cue_ball_pos, shot_call = calculate_shot(msg.system, msg.shot_constraints, msg.break_shot)
-        logging.info(cue)
+        logging.debug(cue)
         buffer.push_msg(msgutil.MakeShotMessage(cue, cue_ball_pos=cue_ball_pos, shot_call=shot_call))
     elif isinstance(msg, msgutil.GameOverMessage):
         logging.info('Match over!')

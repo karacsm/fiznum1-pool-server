@@ -80,7 +80,7 @@ class Viewer(ShowBase):
                     logging.info(f'Failed to connect! {msg.reason}')
                     return task.done
                 else:
-                    logging.info('Unexpected message!')
+                    logging.warning('Unexpected message!')
         #viewing
         elif self.state == ViewerState.Viewing:
             self.buffer.update()
@@ -94,14 +94,13 @@ class Viewer(ShowBase):
                     logging.info(msg.shot_info)
                     logging.info(msg.scores)
                     self.system = msg.system
-                    self.controller.teardown()
                     self.controller.attach_system(self.system)
                     self.controller.buildup()
                     self.controller.build_shot_animation()
                     self.controller.animate()
                     self.controller.advance_to_end_of_stroke()
                 else:
-                    logging.info('Unexpected message!')
+                    logging.warning('Unexpected message!')
         else:
             raise NotImplementedError('Unkown state!')
         return task.again

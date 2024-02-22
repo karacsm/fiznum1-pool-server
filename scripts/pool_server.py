@@ -105,7 +105,7 @@ class ConnectionHandler:
         elif isinstance(msg, msgutil.LoginMessage):
             return self._handle_login(conn, msg)
         else:
-            logging.info('Unexpected message from connection!')
+            logging.warning('Unexpected message from connection!')
             conn.close()
             return None
 
@@ -173,7 +173,7 @@ class MatchServer:
             elif conn.type == msgutil.ConnectionType.VIEWER:
                 self._add_viewer_connection(conn)
             else:
-                logging.info('Unexpected connection! Dropping connection!')
+                logging.warning('Unexpected connection! Dropping connection!')
                 conn.close()
 
     def _stage_waiting_for_players(self, handler: ConnectionHandler):
@@ -238,7 +238,7 @@ class MatchServer:
                     self._state = MatchState.ReadyForNextMove
                 self._send_broad_cast_message(shot_info, system, break_shot)
             else:
-                logging.info('Unexpected message!')
+                logging.warning('Unexpected message!')
 
     def _stage_match_over(self):
         logging.info('Match over!')
