@@ -6,11 +6,11 @@ import pooltool as pt
 import threading
 import select
 from pooltool import System, Cue
-from pooltool.game.ruleset.datatypes import ShotConstraints
+from pooltool.game.ruleset.datatypes import ShotConstraints, ShotInfo
 from .poolgame import ShotCall, BallPosition
 from enum import IntEnum
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 _MSG_HEADER_SIZE = 4
 _MSG_HEADER_BYTEORDER = 'little'
@@ -34,6 +34,7 @@ class MessageCode(IntEnum):
     YourTurn = 4
     MakeShot = 5
     GameOver = 6
+    Broadcast = 7
 
 @dataclass
 class Message:
@@ -139,13 +140,33 @@ class MakeShotMessage(Message):
             self.shot_call = None
 
 class GameOverMessage(Message):
-    def __init__(self, winner: str, scores: dict):
+    def __init__(self, winner: str, scores: Dict[str, int]):
         self.winner = winner
         self.scores = scores
         super().__init__(MessageCode.GameOver, {'winner' : winner, 'scores' : scores})
 
     def _decode_data(self):
         self.winner = self.data['winner']
+        self.scores = self.data['scores']
+
+class BroadcastMessage(Message):
+    def __init__(self, system: System, shot_info: ShotInfo, break_shot: bool, scores: Dict[str, int]):
+        self.system = system
+        self.shot_info = shot_info
+        self.break_shot = break_shot
+        self.scores = scores
+        data = {'system' : pt.serialize.conversion.converters['json'].unstructure(system),
+                'shot_info' : pt.serialize.conversion.converters['json'].unstructure(shot_info),
+                'break_shot' : break_shot,
+                'scores' : scores}
+        super().__init__(MessageCode.Broadcast, data)
+
+    def _decode_data(self):
+        raw_system = self.data['system']
+        raw_shot_info = self.data['shot_info']
+        self.system = pt.serialize.conversion.converters['json'].structure(raw_system, System)
+        self.shot_info = pt.serialize.conversion.converters['json'].structure(raw_shot_info, ShotInfo)
+        self.break_shot = self.data['break_shot']
         self.scores = self.data['scores']
 
 _message_translation_dict = {
@@ -155,7 +176,8 @@ _message_translation_dict = {
     MessageCode.LoginFailed : LoginFailedMessage,
     MessageCode.YourTurn : YourTurnMessage,
     MessageCode.MakeShot : MakeShotMessage,
-    MessageCode.GameOver : GameOverMessage
+    MessageCode.GameOver : GameOverMessage,
+    MessageCode.Broadcast : BroadcastMessage
 }
 
 def decode_msg(msg: bytes) -> Message:
