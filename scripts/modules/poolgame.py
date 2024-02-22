@@ -52,6 +52,7 @@ class PoolGame:
         pt.simulate(self._system, inplace=True)
         self._ruleset.process_and_advance(self._system)
         self._history.append(self._system.copy())
+        return self._ruleset.shot_info
 
     def get_shot_constraints(self) -> ShotConstraints:
         return self._ruleset.shot_constraints
@@ -146,7 +147,8 @@ class PoolMatch:
 
     def make_shot(self, cue: pt.Cue, cue_ball_spot: Optional[BallPosition] = None, call: Optional[ShotCall] = None):
         if not self._match_over:
-            self._current_game.make_shot(cue, cue_ball_spot, call)
+            info = self._current_game.make_shot(cue, cue_ball_spot, call)
             self._update()
+            return info
             
 
