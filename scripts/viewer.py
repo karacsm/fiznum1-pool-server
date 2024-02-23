@@ -12,6 +12,7 @@ import pooltool.ani as ani
 from direct.showbase.ShowBase import ShowBase
 from pooltool.system.render import SystemController, PlaybackMode
 from pooltool.ani.environment import Environment
+from direct.gui.OnscreenText import OnscreenText
 
 def get_initial_system(game_type: pt.GameType) -> pt.System:
     table = pt.Table.from_game_type(game_type)
@@ -54,6 +55,9 @@ class Viewer(ShowBase):
         else:
             self.secret = None
         self.exitFunc = self.exit
+        font = self.loader.load_font('fonts/Anta/Anta-Regular.ttf')
+        self.score_display = OnscreenText(text = '', font = font, pos = (-0.93, 0.89), scale = 0.1, fg=(1, 0, 0, 1), bg = (0.3, 0.3, 0.3, 0.7))
+        self.turn_indicator = OnscreenText(text = '', font = font, pos = (0.81, -0.95), scale = 0.1, fg=(1, 0, 0, 1), bg = (0.3, 0.3, 0.3, 0.7))
 
     def update(self, task):
         #waiting for connection
@@ -91,8 +95,10 @@ class Viewer(ShowBase):
                     return task.done
                 elif isinstance(msg, msgutil.BroadcastMessage):
                     del self.system
-                    logging.info(msg.shot_info)
-                    logging.info(msg.scores)
+                    player_names = list(msg.scores.keys())
+                    player_scores = list(msg.scores.values())
+                    self.score_display.text = f'{player_names[0].upper()}: {player_scores[0]} vs. {player_names[1].upper()}: {player_scores[1]}'
+                    self.turn_indicator.text = f'Active player: {msg.shot_info.player.name.upper()}'
                     self.system = msg.system
                     self.controller.attach_system(self.system)
                     self.controller.buildup()
