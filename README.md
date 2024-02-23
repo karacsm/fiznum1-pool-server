@@ -38,3 +38,9 @@ If the server was started with the flag `-v` then you can connect the viewer cli
 
 The viewer client receives a broadcast in real time form the server about the state of the game and displays the shots made by the players. Similarly to the player client you can reconnect with the secret provided on the first connection.
 
+### Screenshots
+
+![](https://github.com/karacsm/fiznum1-pool-server/blob/main/screenshots/Screenshot%20from%202024-02-23%2015-11-33.png)
+
+
+![](https://github.com/karacsm/fiznum1-pool-server/blob/main/screenshots/Screenshot%20from%202024-02-23%2015-12-19.png)
