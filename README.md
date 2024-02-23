@@ -4,6 +4,12 @@ Server for the fiznum1 AI pool contest. The server uses the [pooltool](https://g
 
 This repository contains scripts for running a pool match on a tcp socket server. (Only 9-ball is supported for now.)
 
+### Install
+
+To install dependencies run:
+
+`pip install -r requirements.txt`
+
 ### Starting the server
 
 To start the pool server open a console in the `scripts` directory and type:
