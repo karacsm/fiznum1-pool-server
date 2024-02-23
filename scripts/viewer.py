@@ -13,6 +13,8 @@ from direct.showbase.ShowBase import ShowBase
 from pooltool.system.render import SystemController, PlaybackMode
 from pooltool.ani.environment import Environment
 from direct.gui.OnscreenText import OnscreenText
+from panda3d.core import TextNode, TextFont
+from direct.task.Task import Task
 
 def get_initial_system(game_type: pt.GameType) -> pt.System:
     table = pt.Table.from_game_type(game_type)
@@ -37,6 +39,7 @@ class Viewer(ShowBase):
         self.controller = SystemController()
         self.controller.attach_system(self.system)
         self.controller.buildup()
+        self.controller.cue.hide_nodes()
         self.env = Environment()
         self.env.init(self.system.table)
         self.camLens.set_near(0.1)
@@ -56,10 +59,28 @@ class Viewer(ShowBase):
             self.secret = None
         self.exitFunc = self.exit
         font = self.loader.load_font('fonts/Anta/Anta-Regular.ttf')
-        self.score_display = OnscreenText(text = '', font = font, pos = (-0.93, 0.89), scale = 0.1, fg=(1, 0, 0, 1), bg = (0.3, 0.3, 0.3, 0.7))
-        self.turn_indicator = OnscreenText(text = '', font = font, pos = (0.81, -0.95), scale = 0.1, fg=(1, 0, 0, 1), bg = (0.3, 0.3, 0.3, 0.7))
+        bg_color = (0.92, 0.83, 0.68, 0.0)
+        text_color = (0.9, 0.0, 0.0, 1.0)
+        frame_color = (0.0, 0.0, 0.0, 1.0)
+        self.score_display = OnscreenText(text = '', font = font, pos = (-0.88, 0.88), scale = 0.1, fg=text_color, bg = bg_color, shadow = (0.05, 0.05, 0.05, 1), shadowOffset=(0.05, 0.05))
+        self.turn_indicator = OnscreenText(text = '', font = font, pos = (0.81, -0.94), scale = 0.1, fg=text_color, bg = bg_color, shadow = (0.05, 0.05, 0.05, 1), shadowOffset=(0.05, 0.05))
+        self.game_over_text = OnscreenText(text = '', font = font, pos = (0, 0), scale = 0.2, fg=text_color, bg = bg_color, shadow = (0.05, 0.05, 0.05, 1), shadowOffset=(0.05, 0.05))
+        self.game_over_text.hide()
+        self.accept('game_over', self.on_game_over)
+        self.accept('update_score', self.update_score)
 
-    def update(self, task):
+    async def on_game_over(self, winner, wait):
+        await Task.pause(wait)
+        self.game_over_text.text = f'GAME OVER! {winner.upper()} WON!'
+        self.game_over_text.show()
+
+    async def update_score(self, scores, wait):
+        await Task.pause(wait)
+        player_names = list(scores.keys())
+        player_scores = list(scores.values())
+        self.score_display.text = f'{player_names[0].upper()}: {player_scores[0]} vs. {player_names[1].upper()}: {player_scores[1]}'
+
+    async def update(self, task):
         #waiting for connection
         if self.state == ViewerState.WaitingForConnection:
             try:
@@ -95,14 +116,17 @@ class Viewer(ShowBase):
                     return task.done
                 elif isinstance(msg, msgutil.BroadcastMessage):
                     del self.system
-                    player_names = list(msg.scores.keys())
-                    player_scores = list(msg.scores.values())
-                    self.score_display.text = f'{player_names[0].upper()}: {player_scores[0]} vs. {player_names[1].upper()}: {player_scores[1]}'
+                    self.game_over_text.hide()
                     self.turn_indicator.text = f'Active player: {msg.shot_info.player.name.upper()}'
                     self.system = msg.system
+                    if msg.shot_info.game_over:
+                        self.messenger.send('game_over', [msg.shot_info.winner.name, self.system.t])
+                    self.messenger.send('update_score', [msg.scores, self.system.t])
                     self.controller.attach_system(self.system)
                     self.controller.buildup()
                     self.controller.build_shot_animation()
+                    self.controller.cue.hide_nodes()
+                    await task.pause(1.0)
                     self.controller.animate()
                     self.controller.advance_to_end_of_stroke()
                 else:
@@ -118,6 +142,7 @@ def main(args):
     logging.basicConfig(stream=sys.stdout,
                         format='[%(asctime)s] %(levelname)s: %(message)s',
                         datefmt='%Y-%m-%d %H:%M:%S', level = args.log_level)
+
     viewer = Viewer((args.address, args.port), args.name, args.secret)
     viewer.run()
 
