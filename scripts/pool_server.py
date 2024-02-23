@@ -214,7 +214,7 @@ class MatchServer:
                                                               break_shot,
                                                               self._match._scores))
                 if self._view_mode:
-                    time.sleep(self._match.get_system().t + 2)
+                    time.sleep(system.t + 2)
 
     def _stage_waiting_for_next_move(self):
         player = self._match.active_player_name()
