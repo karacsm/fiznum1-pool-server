@@ -10,10 +10,9 @@ from enum import Enum
 import pooltool as pt
 import pooltool.ani as ani
 from direct.showbase.ShowBase import ShowBase
-from pooltool.system.render import SystemController, PlaybackMode
+from pooltool.system.render import SystemController
 from pooltool.ani.environment import Environment
 from direct.gui.OnscreenText import OnscreenText
-from panda3d.core import TextNode, TextFont
 from direct.task.Task import Task
 
 def get_initial_system(game_type: pt.GameType) -> pt.System:
@@ -50,7 +49,6 @@ class Viewer(ShowBase):
         self.task_mgr.doMethodLater(self.update_time, self.update, 'update')
         self.state = ViewerState.WaitingForConnection
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.setblocking(False)
         self.buffer: msgutil.MessageBuffer
         self.name = name
         if secret is not None:
@@ -61,18 +59,20 @@ class Viewer(ShowBase):
         font = self.loader.load_font('fonts/Anta/Anta-Regular.ttf')
         bg_color = (0.92, 0.83, 0.68, 0.0)
         text_color = (0.9, 0.0, 0.0, 1.0)
-        frame_color = (0.0, 0.0, 0.0, 1.0)
         self.score_display = OnscreenText(text = '', font = font, pos = (-0.88, 0.88), scale = 0.1, fg=text_color, bg = bg_color, shadow = (0.05, 0.05, 0.05, 1), shadowOffset=(0.05, 0.05))
         self.turn_indicator = OnscreenText(text = '', font = font, pos = (0.81, -0.94), scale = 0.1, fg=text_color, bg = bg_color, shadow = (0.05, 0.05, 0.05, 1), shadowOffset=(0.05, 0.05))
         self.game_over_text = OnscreenText(text = '', font = font, pos = (0, 0), scale = 0.2, fg=text_color, bg = bg_color, shadow = (0.05, 0.05, 0.05, 1), shadowOffset=(0.05, 0.05))
         self.game_over_text.hide()
         self.accept('game_over', self.on_game_over)
         self.accept('update_score', self.update_score)
+        self.accept('animate_shot', self.animate_shot)
 
     async def on_game_over(self, winner, wait):
         await Task.pause(wait)
         self.game_over_text.text = f'GAME OVER! {winner.upper()} WON!'
         self.game_over_text.show()
+        await Task.pause(2.5)
+        self.game_over_text.hide()
 
     async def update_score(self, scores, wait):
         await Task.pause(wait)
@@ -80,16 +80,23 @@ class Viewer(ShowBase):
         player_scores = list(scores.values())
         self.score_display.text = f'{player_names[0].upper()}: {player_scores[0]} vs. {player_names[1].upper()}: {player_scores[1]}'
 
-    async def update(self, task):
+    async def animate_shot(self):
+        await Task.pause(1.5)
+        self.controller.animate()
+        self.controller.advance_to_end_of_stroke()
+
+    def update(self, task):
         #waiting for connection
         if self.state == ViewerState.WaitingForConnection:
             try:
                 self.sock.connect(self.address)
+                self.sock.setblocking(False)
                 self.buffer = msgutil.MessageBuffer(self.sock, run=False)
                 self.buffer.push_msg(msgutil.LoginMessage(self.name, secret=self.secret, conn_type=msgutil.ConnectionType.VIEWER))
                 self.state = ViewerState.ConnectionPending
-            except BlockingIOError:
+            except ConnectionRefusedError:
                 pass
+        
         #connection pending
         elif self.state == ViewerState.ConnectionPending:
             self.buffer.update()
@@ -116,7 +123,6 @@ class Viewer(ShowBase):
                     return task.done
                 elif isinstance(msg, msgutil.BroadcastMessage):
                     del self.system
-                    self.game_over_text.hide()
                     self.turn_indicator.text = f'Active player: {msg.shot_info.player.name.upper()}'
                     self.system = msg.system
                     if msg.shot_info.game_over:
@@ -126,9 +132,7 @@ class Viewer(ShowBase):
                     self.controller.buildup()
                     self.controller.build_shot_animation()
                     self.controller.cue.hide_nodes()
-                    await task.pause(1.0)
-                    self.controller.animate()
-                    self.controller.advance_to_end_of_stroke()
+                    self.messenger.send('animate_shot')
                 else:
                     logging.warning('Unexpected message!')
         else:
