@@ -35,6 +35,8 @@ class PoolGame:
     def make_shot(self, cue: pt.Cue, cue_ball_spot: Optional[BallPosition] = None, call: Optional[ShotCall] = None):
         if self.is_game_over():
             return
+        if cue.V0 > 4:
+            cue.set_state(V0=4)
         self._system.cue = cue
         if (cue_ball_spot is not None) and ('cue' in self._ruleset.shot_constraints.movable):
             ball_in_hand = self._ruleset.shot_constraints.ball_in_hand
